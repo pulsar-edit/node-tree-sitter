@@ -25,11 +25,8 @@ class CallbackInput {
     : callback(callback),
       byte_offset(0),
       partial_string_offset(0) {
-    if (js_buffer_size->IsUint32()) {
-      buffer.resize(Local<Integer>::Cast(js_buffer_size)->Uint32Value());
-    } else {
-      buffer.resize(32 * 1024);
-    }
+    uint32_t buffer_size = Nan::To<uint32_t>(js_buffer_size).FromMaybe(32 * 1024);
+    buffer.resize(buffer_size);
   }
 
   TSInput Input() {
@@ -50,8 +47,9 @@ class CallbackInput {
       reader->partial_string.Reset();
     }
 
+    *bytes_read = 0;
     Local<String> result;
-    uint32_t start;
+    uint32_t start = 0;
     if (reader->partial_string_offset) {
       result = Nan::New(reader->partial_string);
       start = reader->partial_string_offset;
@@ -60,18 +58,26 @@ class CallbackInput {
       uint32_t utf16_unit = byte / 2;
       Local<Value> argv[2] = { Nan::New<Number>(utf16_unit), PointToJS(position) };
       TryCatch try_catch(Isolate::GetCurrent());
-      auto result_value = callback->Call(Nan::Null(), 2, argv);
-      if (!try_catch.HasCaught() && result_value->IsString()) {
-        result = Local<String>::Cast(result_value);
-        start = 0;
-      } else {
-        *bytes_read = 0;
-        start = 0;
-        return "";
-      }
+      auto maybe_result_value = Nan::Call(callback, callback->CreationContext()->Global(), 2, argv);
+      if (try_catch.HasCaught()) return nullptr;
+
+      Local<Value> result_value;
+      if (!maybe_result_value.ToLocal(&result_value)) return nullptr;
+      if (!Nan::To<String>(result_value).ToLocal(&result)) return nullptr;
     }
 
-    int utf16_units_read = result->Write(reader->buffer.data(), start, reader->buffer.size(), 2);
+    int utf16_units_read = result->Write(
+
+      // Nan doesn't wrap this functionality
+      #if NODE_MAJOR_VERSION >= 12
+            Isolate::GetCurrent(),
+      #endif
+
+      reader->buffer.data(),
+      start,
+      reader->buffer.size(),
+      2
+    );
     int end = start + utf16_units_read;
     *bytes_read = 2 * utf16_units_read;
 
@@ -172,9 +178,9 @@ void Parser::Init(Local<Object> exports) {
     Nan::SetPrototypeMethod(tpl, methods[i].name, methods[i].callback);
   }
 
-  constructor.Reset(Nan::Persistent<Function>(tpl->GetFunction()));
-  exports->Set(class_name, Nan::New(constructor));
-  exports->Set(Nan::New("LANGUAGE_VERSION").ToLocalChecked(), Nan::New<Number>(TREE_SITTER_LANGUAGE_VERSION));
+  constructor.Reset(Nan::Persistent<Function>(Nan::GetFunction(tpl).ToLocalChecked()));
+  Nan::Set(exports, class_name, Nan::New(constructor));
+  Nan::Set(exports, Nan::New("LANGUAGE_VERSION").ToLocalChecked(), Nan::New<Number>(TREE_SITTER_LANGUAGE_VERSION));
 }
 
 Parser::Parser() : parser_(ts_parser_new()), is_parsing_async_(false) {}
@@ -187,7 +193,9 @@ static bool handle_included_ranges(TSParser *parser, Local<Value> arg) {
     auto js_included_ranges = Local<Array>::Cast(arg);
     vector<TSRange> included_ranges;
     for (unsigned i = 0; i < js_included_ranges->Length(); i++) {
-      auto maybe_range = RangeFromJS(js_included_ranges->Get(i));
+      Local<Value> range_value;
+      if (!Nan::Get(js_included_ranges, i).ToLocal(&range_value)) return false;
+      auto maybe_range = RangeFromJS(range_value);
       if (!maybe_range.IsJust()) return false;
       auto range = maybe_range.FromJust();
       if (range.start_byte < last_included_range_end) {
@@ -272,9 +280,10 @@ void Parser::Parse(const Nan::FunctionCallbackInfo<Value> &info) {
 
   Local<Function> callback = Local<Function>::Cast(info[0]);
 
+  Local<Object> js_old_tree;
   const TSTree *old_tree = nullptr;
-  if (info.Length() > 1 && info[1]->BooleanValue()) {
-    const Tree *tree = Tree::UnwrapTree(info[1]);
+  if (info.Length() > 1 && Nan::To<Object>(info[1]).ToLocal(&js_old_tree)) {
+    const Tree *tree = Tree::UnwrapTree(js_old_tree);
     if (!tree) {
       Nan::ThrowTypeError("Second argument must be a tree");
       return;
@@ -327,9 +336,10 @@ void Parser::ParseTextBuffer(const Nan::FunctionCallbackInfo<Value> &info) {
     return;
   }
 
+  Local<Object> js_old_tree;
   const TSTree *old_tree = nullptr;
-  if (info.Length() > 2 && info[2]->BooleanValue()) {
-    const Tree *tree = Tree::UnwrapTree(info[2]);
+  if (info.Length() > 2 && Nan::To<Object>(info[2]).ToLocal(&js_old_tree)) {
+    const Tree *tree = Tree::UnwrapTree(js_old_tree);
     if (!tree) {
       Nan::ThrowTypeError("Second argument must be a tree");
       return;
@@ -344,18 +354,21 @@ void Parser::ParseTextBuffer(const Nan::FunctionCallbackInfo<Value> &info) {
 
   // If a `syncTimeoutMicros` option is passed, parse synchronously
   // for the given amount of time before queuing an async task.
-  if (info[4]->BooleanValue()) {
-    double js_sync_timeout = info[4]->NumberValue();
+  double js_sync_timeout = Nan::To<double>(info[4]).FromMaybe(-1);
+  if (js_sync_timeout > 0) {
     size_t sync_timeout;
 
     // If the timeout is `Infinity`, then parse synchronously with no timeout.
-    if (js_sync_timeout > 0 && !std::isfinite(js_sync_timeout)) {
+    if (js_sync_timeout && !std::isfinite(js_sync_timeout)) {
       sync_timeout = 0;
-    } else if (info[4]->IsUint32()) {
-      sync_timeout = info[4]->Uint32Value();
     } else {
-      Nan::ThrowTypeError("The `syncTimeoutMicros` option must be a positive integer.");
-      return;
+      auto maybe_sync_timeout = Nan::To<uint32_t>(info[4]);
+      if (maybe_sync_timeout.IsJust()) {
+        sync_timeout = maybe_sync_timeout.FromJust();
+      } else {
+        Nan::ThrowTypeError("The `syncTimeoutMicros` option must be a positive integer.");
+        return;
+      }
     }
 
     // Logging is disabled for this method, because we can't call the
@@ -370,7 +383,8 @@ void Parser::ParseTextBuffer(const Nan::FunctionCallbackInfo<Value> &info) {
     if (result) {
       delete input;
       Local<Value> argv[] = {Tree::NewInstance(result)};
-      info[0].As<Function>()->Call(Nan::Null(), 1, argv);
+      auto callback = info[0].As<Function>();
+      Nan::Call(callback, callback->CreationContext()->Global(), 1, argv);
       return;
     }
   }
@@ -391,9 +405,10 @@ void Parser::ParseTextBufferSync(const Nan::FunctionCallbackInfo<Value> &info) {
     return;
   }
 
-  TSTree *old_tree = nullptr;
-  if (info.Length() > 1 && info[1]->BooleanValue()) {
-    const Tree *tree = Tree::UnwrapTree(info[1]);
+  Local<Object> js_old_tree;
+  const TSTree *old_tree = nullptr;
+  if (info.Length() > 1 && Nan::To<Object>(info[1]).ToLocal(&js_old_tree)) {
+    const Tree *tree = Tree::UnwrapTree(js_old_tree);
     if (!tree) {
       Nan::ThrowTypeError("Second argument must be a tree");
       return;
@@ -433,7 +448,7 @@ void Parser::SetLogger(const Nan::FunctionCallbackInfo<Value> &info) {
   if (info[0]->IsFunction()) {
     if (current_logger.payload) delete (Logger *)current_logger.payload;
     ts_parser_set_logger(parser->parser_, Logger::Make(Local<Function>::Cast(info[0])));
-  } else if (!info[0]->BooleanValue()) {
+  } else if (!Nan::To<bool>(info[0]).FromMaybe(true)) {
     if (current_logger.payload) delete (Logger *)current_logger.payload;
     ts_parser_set_logger(parser->parser_, { 0, 0 });
   } else {
@@ -451,9 +466,7 @@ void Parser::PrintDotGraphs(const Nan::FunctionCallbackInfo<Value> &info) {
     return;
   }
 
-  Local<Boolean> value = Local<Boolean>::Cast(info[0]);
-
-  if (value->IsBoolean() && value->BooleanValue()) {
+  if (Nan::To<bool>(info[0]).FromMaybe(false)) {
     ts_parser_print_dot_graphs(parser->parser_, 2);
   } else {
     ts_parser_print_dot_graphs(parser->parser_, -1);

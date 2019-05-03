@@ -11,7 +11,7 @@ describe("Node", () => {
   });
 
   describe(".children", () => {
-    it("returns an array of child nodes", () => {
+    it.only("returns an array of child nodes", () => {
       const tree = parser.parse("x10 + 1000");
       assert.equal(1, tree.rootNode.children.length);
       const sumNode = tree.rootNode.firstChild.firstChild;

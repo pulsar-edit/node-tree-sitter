@@ -283,6 +283,7 @@ Parser.prototype.parse = function(input, oldTree, {bufferSize, includedRanges}={
   } else {
     getText = getTextFromFunction
   }
+  console.log('input', input);
   const tree = parse.call(
     this,
     input,
@@ -290,6 +291,7 @@ Parser.prototype.parse = function(input, oldTree, {bufferSize, includedRanges}={
     bufferSize,
     includedRanges
   );
+  console.log('JS TREE', tree);
   if (tree) {
     tree.input = treeInput
     tree.getText = getText
