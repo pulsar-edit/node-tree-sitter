@@ -1,6 +1,6 @@
 #include "./tree.h"
 #include <string>
-#include <nan.h>
+#include <cassert>
 #include "./node.h"
 #include "./logger.h"
 #include "./util.h"
