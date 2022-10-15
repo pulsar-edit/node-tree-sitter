@@ -5,7 +5,6 @@ coverage
 .grunt
 build
 gyp-mac-tool
-tree_sitter
 *.xcodeproj
 node_modules
 .vagrant
